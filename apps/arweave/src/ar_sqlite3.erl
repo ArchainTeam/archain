@@ -7,6 +7,7 @@
 -export([select_block_by_tx_id/1, select_tags_by_tx_id/1]).
 -export([eval_legacy_arql/1]).
 -export([insert_full_block/1]).
+-export([get_max_query_limit/0]).
 -export([init/1, handle_call/3, handle_cast/2, terminate/2]).
 
 -include("ar.hrl").
@@ -87,6 +88,8 @@ DROP INDEX idx_tag_name_value;
 
 -define(SELECT_TAGS_BY_TX_ID_SQL, "SELECT * FROM tag WHERE tx_id = ?").
 
+-define(MAX_QUERY_LIMIT, 50).
+
 %%%===================================================================
 %%% Public API.
 %%%===================================================================
@@ -122,6 +125,9 @@ insert_full_block(#block {} = FullBlock) ->
 		gen_server:cast(?MODULE, {insert_tag, TagFields})
 	end, TagFieldsList),
 	ok.
+
+get_max_query_limit() ->
+	?MAX_QUERY_LIMIT.
 
 %%%===================================================================
 %%% Generic server callbacks.
@@ -161,12 +167,16 @@ handle_call({select_tx_by_id, ID}, _, State) ->
 	ok = sqlite3:reset(?DB_NAME, Stmt),
 	{reply, Reply, State};
 handle_call({select_txs_by, Opts}, _, State) ->
-	{WhereClause, Params} = select_txs_by_where_clause(Opts),
+	{WhereClause, WhereParams} = select_txs_by_where_clause(Opts),
+	Limit = min(proplists:get_value(limit, Opts, ?MAX_QUERY_LIMIT), ?MAX_QUERY_LIMIT),
+	Offset = proplists:get_value(offset, Opts, 0),
+	Params = WhereParams ++ [Limit, Offset],
 	SQL = lists:concat([
 		"SELECT tx.* FROM tx ",
 		"JOIN block on tx.block_indep_hash = block.indep_hash ",
-		"WHERE ", WhereClause,
-		" ORDER BY block.height DESC, tx.id DESC"
+		"WHERE ", WhereClause, " ",
+		"ORDER BY block.height DESC, tx.id DESC ",
+		"LIMIT ? OFFSET ?"
 	]),
 	{ok, Stmt} = sqlite3:prepare(?DB_NAME, SQL),
 	ok = sqlite3:bind(?DB_NAME, Stmt, Params),
@@ -194,8 +204,9 @@ handle_call({eval_legacy_arql, Query}, _, State) ->
 			SQL = lists:concat([
 				"SELECT tx.id FROM tx ",
 				"JOIN block ON tx.block_indep_hash = block.indep_hash ",
-				"WHERE ", WhereClause,
-				" ORDER BY block.height DESC, tx.id DESC"
+				"WHERE ", WhereClause, " ",
+				"ORDER BY block.height DESC, tx.id DESC ",
+				"LIMIT ", integer_to_list(?MAX_QUERY_LIMIT)
 			]),
 			case sqlite3:prepare(?DB_NAME, SQL) of
 				{ok, Stmt} ->
